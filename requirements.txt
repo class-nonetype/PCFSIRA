@@ -1,0 +1,9 @@
+pandas
+python-calamine
+polars
+fastexcel
+openpyxl
+xlsxwriter
+sqlalchemy
+psycopg2-binary
+python-dotenv
