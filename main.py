@@ -1,7 +1,6 @@
 from unicodedata import normalize
 from re import Pattern, compile, sub
 from pathlib import Path
-from dotenv import load_dotenv
 from logging import basicConfig, getLogger, ERROR, DEBUG
 from zipfile import ZipFile
 from shutil import rmtree
@@ -10,7 +9,8 @@ from uuid import uuid4
 from pandas import ExcelFile, ExcelWriter, read_excel, DataFrame, concat
 
 
-load_dotenv()
+# source venv/bin/activate
+
 basicConfig(
     level=DEBUG,
     format='%(asctime)s [ %(levelname)s ]\t%(message)s',
@@ -49,7 +49,7 @@ def identify_sheet(name: str) -> int | None:
     return None
 
 def read_sheet(file_path: Path, sheet_name: str, max_columns: int) -> DataFrame:
-    dataframe = read_excel(io=file_path, sheet_name=sheet_name, engine='calamine', skiprows=1)
+    dataframe = read_excel(io=file_path, sheet_name=sheet_name, engine='calamine', skiprows=1, dtype=str)
     return dataframe.iloc[:, :max_columns]
 
 
@@ -144,12 +144,20 @@ for file_index, file in enumerate(files, 1):
         logger.debug('%d / %d\t%s' % (file_index, total_files, file.name))
 
 
-export_file_path = export_directory_path / f'{uuid4()}.xlsx'
+export_batch_directory_path = export_directory_path / str(uuid4())
+ensure_directory(export_batch_directory_path)
 
 
-with ExcelWriter(export_file_path, engine='xlsxwriter', engine_kwargs={'options': {'constant_memory': True}}) as excel_writer:
-    for sheet_code, dataframes in storage.items():
-        combined = concat(dataframes, ignore_index=True)
+for sheet_code, dataframes in storage.items():
+    combined = concat(dataframes, ignore_index=True)
+
+    sheet_file_path = (export_batch_directory_path / f'{sheet_names[sheet_code]}.xlsx')
+
+    with ExcelWriter(sheet_file_path, engine='xlsxwriter', engine_kwargs={'options': {'constant_memory': True}}) as excel_writer:
         combined.to_excel(excel_writer, sheet_name=sheet_names[sheet_code], index=False)
-        logger.debug('%s (%d filas)' % (sheet_names[sheet_code], len(combined)))
+
+    logger.debug('%s (%d filas)' % (sheet_names[sheet_code], len(combined)))
+
+errors_file_path = export_batch_directory_path / 'Errores.xlsx'
+with ExcelWriter(errors_file_path, engine='xlsxwriter', engine_kwargs={'options': {'constant_memory': True}}) as excel_writer:
     DataFrame(errors).to_excel(excel_writer, sheet_name='Errores', index=False)
