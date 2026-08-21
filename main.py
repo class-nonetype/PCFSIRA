@@ -7,6 +7,11 @@ from uuid import uuid4
 from logging import basicConfig, getLogger, ERROR, DEBUG
 from zipfile import ZIP_DEFLATED, ZipFile
 from shutil import rmtree
+from os import environ
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
+
+load_dotenv()
 
 
 def ensure_directory(directory_path: Path) -> None:
@@ -37,14 +42,14 @@ def remove_directory(directory_path: Path) -> None:
 
 
 
-def compress_to_zip_file() -> None:
+def compress_to_zip_file(files: list[Path]) -> None:
     if not output_directory_path.exists():
         ensure_directory(output_directory_path)
 
     zip_file_path = (output_directory_path / f'{uuid4()}.zip')
     with ZipFile(file=zip_file_path, mode='w', compression=ZIP_DEFLATED, compresslevel=9) as zip_file:
-        for file in data_files:
-            zip_file.write(file)
+        for file in files:
+            zip_file.write(file, arcname=file.name)
 
 
 
@@ -131,7 +136,7 @@ sheet_names = {
     5: 'OG5 - Detalle',
 }
 
-export_files = {
+output_files = {
     'OG 1 - Detalle': [1],
     'OG 2 - Detalle': [2],
     'OG 3 - Detalle': [3],
@@ -199,39 +204,49 @@ def export_dataframe(workbook: Workbook, worksheet_name: str, dataframe: DataFra
 
 
 def main():
+    # lista para almacenamiento de los dataframes extraidos
     storage: dict[int | float, list[DataFrame]] = {}
+    
+    # lista para almacenamiento de posibles errores durante la consolidación
     errors: list[dict[str, str]] = []
 
+
     for file_index, file in enumerate(data_files, 1):
-
+        
+        # caso de extensión inválida
         if file.suffix not in allowed_extensions:
-            error = f'Archivo con extensión inválida \'{file.suffix}\''
-            errors.append({'Archivo': file.name, 'Descripción': error})
+            errors.append({'Archivo': file.name, 'Descripción': f'Archivo con extensión inválida \'{file.suffix}\''})
             continue
-
-        excel_file_content = read_excel(
+        
+        # lectura de archivo excel
+        excel_file_content: dict[str, DataFrame] = read_excel(
             source=file,
             engine='calamine',
             sheet_id=0,
             raise_if_empty=False,
             read_options={'dtypes': 'string', 'header_row': 1}
         )
-
         for sheet_name, dataframe in excel_file_content.items():
+            if sheet_name.lower().startswith('i') or sheet_name.lower().startswith('d'):
+                continue
+            
             sheet_code = identify_sheet(sheet_name)
+            
+            # hojas sin match
             if sheet_code is None:
-                error = f'Hoja inválida \'{sheet_name}\''
-                errors.append({'Archivo': file.name, 'Descripción': error})
+                errors.append({'Archivo': file.name, 'Descripción': f'Hoja \'{sheet_name}\' inválida'})
                 continue
 
+            # hojas sin contenido
             if dataframe.is_empty():
-                error = f'Hoja vacía \'{sheet_name}\''
-                errors.append({'Archivo': file.name, 'Descripción': error})
+                errors.append({'Archivo': file.name, 'Descripción': f'Hoja \'{sheet_name}\' vacía'})
                 continue
 
-
+            # caso 1: el dataframe cumple con el formato establecido por la planilla base
             if dataframe.shape[1] == sheet_column_range[sheet_code]:
                 dataframe.columns = canonical_columns[sheet_code]
+                
+                # almacenamiento de contenido
                 storage.setdefault(sheet_code, []).append(dataframe)
 
                 progress_width = len(str(total_data_files))
@@ -239,16 +254,29 @@ def main():
 
                 logger.debug(f'{progress:<{progress_width * 2 + 1 + 4}}{sheet_name:<28}{file.name}')
                 continue
-
+            
+            # caso 2: el dataframe cuenta con columnas faltantes
             elif dataframe.shape[1] < sheet_column_range[sheet_code]:
-                error = f'{sheet_column_range[sheet_code] - dataframe.shape[1]} Columnas faltantes'
+                
+                # lista de columnas faltantes
+                missing_columns = set(canonical_columns[sheet_code]) - set(dataframe.columns)
+                if len(missing_columns) > 0:
+                    for column in missing_columns:
+                        errors.append({'Archivo': file.name, 'Descripción': f'Columna \'{column}\' faltante'})
+                continue
 
+            # caso 3: el dataframe cuenta con columnas sobrantes
             elif dataframe.shape[1] > sheet_column_range[sheet_code]:
-                error = f'{dataframe.shape[1] - sheet_column_range[sheet_code]} Columnas sobrantes'
+                
+                # lista de columnas sobrantes
+                extra_columns = set(dataframe.columns) - set(canonical_columns[sheet_code])
+                if len(extra_columns) > 0:
+                    for column in extra_columns:
+                        errors.append({'Archivo': file.name, 'Descripción': f'Columna \'{column}\' sobrante'})
+                continue
 
-            errors.append({'Archivo': file.name, 'Descripción': error})
 
-    
+    # entiendase como '{ código: consolidación }'
     combined_by_code = {
         sheet_code: (
             concat(dataframes, how='vertical')
@@ -258,13 +286,25 @@ def main():
         for sheet_code, dataframes in storage.items()
     }
 
-    total_files = len(export_files)
-    files_width = len(str(total_files))
 
-    ensure_directory(output_directory_path)
+    # consolidación en base de datos local
+    #engine = create_engine(environ['DATABASE_URL'])
+    #for sheet_code, combined in combined_by_code.items():
+    #    table_name = base_sheet_names[sheet_code]
+    #    combined.write_database(table_name=table_name, connection=engine, if_table_exists='append')
+    #    logger.debug(f'{table_name:<28}{len(combined)} filas insertadas')
+
+
+    
+    # consolidación en archivos excel
+    total_output_files = len(output_files)
+    output_files_width = len(str(total_output_files))
+
     clear_directory(output_directory_path)
 
-    for file_index, (file_name, sheet_codes) in enumerate(export_files.items(), 1):
+    exported_file_paths: list[Path] = []
+
+    for file_index, (file_name, sheet_codes) in enumerate(output_files.items(), 1):
         combined_sheets = {
             sheet_code: combined_by_code[sheet_code]
             for sheet_code in sheet_codes
@@ -273,24 +313,27 @@ def main():
         if not combined_sheets:
             continue
 
-        sheet_file_path = (output_directory_path / f'{file_name}.xlsx')
+        output_file_path = (output_directory_path / f'{file_name}.xlsx')
 
-        workbook = Workbook(sheet_file_path)
+        workbook = Workbook(output_file_path)
         workbook.use_zip64()
         for sheet_code, combined in combined_sheets.items():
             export_dataframe(workbook, sheet_names[sheet_code], combined)
         workbook.close()
+        exported_file_paths.append(output_file_path)
 
-        progress = f'{file_index:>{files_width}}/{total_files}'
-        logger.debug(f'{progress:<{files_width * 2 + 1 + 4}}{file_name:<28}{sum(len(df) for df in combined_sheets.values())}')
+        progress = f'{file_index:>{output_files_width}}/{total_output_files}'
+        logger.debug(f'{progress:<{output_files_width * 2 + 1 + 4}}{file_name:<28}{sum(len(df) for df in combined_sheets.values())}')
 
-    errors_file_path = output_directory_path / 'Errores.xlsx'
-    errors_workbook = Workbook(errors_file_path)
+    output_file_path = (output_directory_path / 'Errores.xlsx')
+    errors_workbook = Workbook(output_file_path)
     export_dataframe(errors_workbook, 'Errores', DataFrame(errors))
     errors_workbook.close()
-    
-    
-    compress_to_zip_file()
+    exported_file_paths.append(output_file_path)
+
+
+    # comprime en un .zip todos los archivos consolidados
+    compress_to_zip_file(exported_file_paths)
 
 if __name__ == '__main__':
     main()
