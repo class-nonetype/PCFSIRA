@@ -1,4 +1,4 @@
-from polars import DataFrame, read_excel, concat
+from polars import DataFrame, String, col, read_excel, concat
 from xlsxwriter import Workbook
 from pathlib import Path
 from re import Pattern, compile, sub, IGNORECASE
@@ -126,9 +126,17 @@ sheet_names = {
     1: 'OG1 - Detalle',
     2: 'OG2 - Detalle',
     3: 'OG3 - Detalle',
-    4.2: 'OG4 - Detalle M',
+    4.2: 'OG4 - Detalle',
     4.3: 'OG4 - Personal',
     5: 'OG5 - Detalle',
+}
+
+export_files = {
+    'OG 1 - Detalle': [1],
+    'OG 2 - Detalle': [2],
+    'OG 3 - Detalle': [3],
+    'OG 4 - Detalle': [4.2, 4.3],
+    'OG 5 - Detalle': [5],
 }
 
 base_sheet_names = {
@@ -167,7 +175,18 @@ def drop_columns(dataframe: DataFrame, *, exclude: set[str] = frozenset()) -> Da
 
 def export_dataframe(workbook: Workbook, worksheet_name: str, dataframe: DataFrame) -> None:
     worksheet = workbook.add_worksheet(worksheet_name)
-    worksheet.write_row(0, 0, dataframe.columns)
+
+    header_format = workbook.add_format({
+        'bold': False,
+        'valign': 'vcenter',
+        'border': 1,
+        'bg_color': '#4472C4',
+        'font_color': '#FFFFFF',
+    })
+    cell_format = workbook.add_format({'border': 1})
+
+    worksheet.set_row(0, 62)
+    worksheet.write_row(0, 0, dataframe.columns, header_format)
 
     total_rows = dataframe.height
     rows_width = len(str(total_rows))
@@ -175,7 +194,7 @@ def export_dataframe(workbook: Workbook, worksheet_name: str, dataframe: DataFra
     for row_index, row in enumerate(dataframe.iter_rows(), start=1):
         progress = f'{row_index:>{rows_width}}/{total_rows}'
         logger.debug(f'{progress:<{rows_width * 2 + 1 + 4}}{worksheet_name}')
-        worksheet.write_row(row_index, 0, row)
+        worksheet.write_row(row_index, 0, row, cell_format)
 
 
 
@@ -206,7 +225,7 @@ def main():
                 continue
 
             if dataframe.is_empty():
-                error = 'Planilla vacía'
+                error = f'Hoja vacía \'{sheet_name}\''
                 errors.append({'Archivo': file.name, 'Descripción': error})
                 continue
 
@@ -230,29 +249,45 @@ def main():
             errors.append({'Archivo': file.name, 'Descripción': error})
 
     
-    total_sheets = len(storage)
-    groups_width = len(str(total_sheets))
+    combined_by_code = {
+        sheet_code: (
+            concat(dataframes, how='vertical')
+            .with_columns(col(String).str.strip_chars().replace('', None))
+            .fill_null('Sin información')
+        )
+        for sheet_code, dataframes in storage.items()
+    }
+
+    total_files = len(export_files)
+    files_width = len(str(total_files))
 
     ensure_directory(output_directory_path)
+    clear_directory(output_directory_path)
 
-    for sheet_index, (sheet_code, dataframes) in enumerate(storage.items(), 1):
-        combined = concat(dataframes, how='vertical')
-        combined = combined.fill_null('Sin información')
-        sheet_file_path = (output_directory_path / f'{sheet_names[sheet_code]}.xlsx')
+    for file_index, (file_name, sheet_codes) in enumerate(export_files.items(), 1):
+        combined_sheets = {
+            sheet_code: combined_by_code[sheet_code]
+            for sheet_code in sheet_codes
+            if sheet_code in combined_by_code
+        }
+        if not combined_sheets:
+            continue
+
+        sheet_file_path = (output_directory_path / f'{file_name}.xlsx')
 
         workbook = Workbook(sheet_file_path)
         workbook.use_zip64()
-        export_dataframe(workbook, sheet_names[sheet_code], combined)
+        for sheet_code, combined in combined_sheets.items():
+            export_dataframe(workbook, sheet_names[sheet_code], combined)
         workbook.close()
 
-        progress = f'{sheet_index:>{groups_width}}/{total_sheets}'
-        logger.debug(f'{progress:<{groups_width * 2 + 1 + 4}}{sheet_names[sheet_code]:<28}{len(combined)}')
+        progress = f'{file_index:>{files_width}}/{total_files}'
+        logger.debug(f'{progress:<{files_width * 2 + 1 + 4}}{file_name:<28}{sum(len(df) for df in combined_sheets.values())}')
 
     errors_file_path = output_directory_path / 'Errores.xlsx'
     errors_workbook = Workbook(errors_file_path)
     export_dataframe(errors_workbook, 'Errores', DataFrame(errors))
     errors_workbook.close()
-    
     
     
     compress_to_zip_file()
