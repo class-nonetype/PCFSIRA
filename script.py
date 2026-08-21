@@ -1,4 +1,5 @@
 from polars import DataFrame, read_excel, concat
+from xlsxwriter import Workbook
 from pathlib import Path
 from re import Pattern, compile, sub, IGNORECASE
 from unicodedata import normalize
@@ -101,6 +102,19 @@ def drop_columns(dataframe: DataFrame, *, exclude: set[str] = frozenset()) -> Da
     return dataframe.drop(columns_to_drop)
 
 
+def export_dataframe(workbook: Workbook, worksheet_name: str, dataframe: DataFrame) -> None:
+    worksheet = workbook.add_worksheet(worksheet_name)
+    worksheet.write_row(0, 0, dataframe.columns)
+
+    total_rows = dataframe.height
+    rows_width = len(str(total_rows))
+
+    for row_index, row in enumerate(dataframe.iter_rows(), start=1):
+        progress = f'{row_index:>{rows_width}}/{total_rows}'
+        logger.debug(f'{progress:<{rows_width * 2 + 1 + 4}}{worksheet_name}')
+        worksheet.write_row(row_index, 0, row)
+
+
 
 def main():
     storage: dict[int | float, list[DataFrame]] = {}
@@ -109,7 +123,7 @@ def main():
     for file_index, file in enumerate(data_files, 1):
 
         if file.suffix not in allowed_extensions:
-            error = 'Archivo con extensión inválida'
+            error = f'Archivo con extensión inválida \'{file.suffix}\''
             errors.append({'Archivo': file.name, 'Descripción': error})
             continue
 
@@ -159,14 +173,21 @@ def main():
 
     for sheet_index, (sheet_code, dataframes) in enumerate(storage.items(), 1):
         combined = concat(dataframes, how='vertical')
+        combined = combined.fill_null('Sin información')
         sheet_file_path = (output_directory_path / f'{sheet_names[sheet_code]}.xlsx')
-        combined.write_excel(sheet_file_path, worksheet=sheet_names[sheet_code], use_zip64=True)
+
+        workbook = Workbook(sheet_file_path)
+        workbook.use_zip64()
+        export_dataframe(workbook, sheet_names[sheet_code], combined)
+        workbook.close()
 
         progress = f'{sheet_index:>{groups_width}}/{total_sheets}'
         logger.debug(f'{progress:<{groups_width * 2 + 1 + 4}}{sheet_names[sheet_code]:<28}{len(combined)}')
 
     errors_file_path = output_directory_path / 'Errores.xlsx'
-    DataFrame(errors).write_excel(errors_file_path, worksheet='Errores')
+    errors_workbook = Workbook(errors_file_path)
+    export_dataframe(errors_workbook, 'Errores', DataFrame(errors))
+    errors_workbook.close()
 
 if __name__ == '__main__':
     main()
