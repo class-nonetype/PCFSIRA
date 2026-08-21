@@ -1,16 +1,19 @@
-import sqlite3
-from unicodedata import normalize
-from re import Pattern, compile, sub
+from polars import DataFrame, read_excel, concat
+from xlsxwriter import Workbook
 from pathlib import Path
+from re import Pattern, compile, sub, IGNORECASE
+from unicodedata import normalize
+from uuid import uuid4
 from logging import basicConfig, getLogger, ERROR, DEBUG
 from zipfile import ZIP_DEFLATED, ZipFile
 from shutil import rmtree
-from warnings import filterwarnings
-from uuid import uuid4
-from pandas import ExcelFile, ExcelWriter, read_excel, DataFrame, concat, isna
 
 
-# source venv/bin/activate
+
+def extract_zip_file(zip_file_path: Path, output_directory_path: Path) -> None:
+    with ZipFile(file=zip_file_path, mode='r') as zip_file:
+        zip_file.extractall(output_directory_path)
+
 
 basicConfig(
     level=DEBUG,
@@ -22,38 +25,92 @@ getLogger('fastexcel').setLevel(ERROR)
 logger = getLogger(__name__)
 
 execution_path = Path(__file__).parent
-input_directory_path = (execution_path / 'input')
+base_directory_path = (execution_path / 'base')
+source_directory_path = (execution_path / 'source')
 data_directory_path = (execution_path / 'data')
-export_directory_path = (execution_path / 'export')
-
-sheet_names = {
-    1:      'OG1 - Detalle',
-    2:      'OG2 - Detalle',
-    3:      'OG3 - Detalle',
-    4.2:    'OG4 - Detalle M',
-    4.3:    'OG4 - Personal',
-    5:      'OG5 - Detalle',
-}
-
-usecols = {
-    1:      'A:CM',
-    2:      'A:CK',
-    3:      'A:CI',
-    4.2:    'A:W',
-    4.3:    'A:BQ',
-    5:      'A:AS',
-}
+output_directory_path = (execution_path / 'output')
 
 
-data_files: list[Path] = [
+for item in source_directory_path.iterdir():
+    if item.suffix != '.zip':
+        continue
+
+    extract_zip_file(item, data_directory_path)
+
+
+
+allowed_extensions = ('.xlsx', '.xlsb', '.xls', '.xlsm')
+data_files = [
     (root / file)
     for root, _, files in data_directory_path.walk()
     for file in files
 ]
-total_files = len(data_files)
 
-storage: dict[int | float, list[DataFrame]] = {}
-errors: list[dict[str, str]] = []
+total_data_files = len(data_files)
+
+
+unnamed_pattern = compile(r'^__unnamed__', IGNORECASE)
+
+
+sheet_column_range = {
+    1: 91,
+    2: 89,
+    3: 87,
+    4.2: 23,
+    4.3: 69,
+    5: 45,
+}
+
+sheet_names = {
+    1: 'OG1 - Detalle',
+    2: 'OG2 - Detalle',
+    3: 'OG3 - Detalle',
+    4.2: 'OG4 - Detalle M',
+    4.3: 'OG4 - Personal',
+    5: 'OG5 - Detalle',
+}
+
+base_sheet_names = {
+    1: 'og1_detail',
+    2: 'og2_detail',
+    3: 'og3_detail',
+    4.2: 'og4_misc_detail',
+    4.3: 'og4_staff',
+    5: 'og5_detail',
+}
+
+base_file_path = next(base_directory_path.glob('*.xlsx'))
+base_file_sheets = read_excel(source=base_file_path, sheet_id=0, read_options={'header_row': 1})
+
+canonical_columns = {
+    sheet_code: base_file_sheets[base_sheet_name].columns
+    for sheet_code, base_sheet_name in base_sheet_names.items()
+}
+
+
+def clear_directory(directory_path: Path) -> None:
+    for item in directory_path.iterdir():
+        if item.is_file() or item.is_symlink():
+            item.unlink()
+
+        elif item.is_dir():
+            rmtree(item)
+
+
+def remove_directory(directory_path: Path) -> None:
+    rmtree(directory_path)
+
+
+
+def compress_to_zip_file() -> None:
+    zip_file_path = (output_directory_path / f'{uuid4()}.zip')
+    with ZipFile(file=zip_file_path, mode='w', compression=ZIP_DEFLATED, compresslevel=9) as zip_file:
+        for file in data_files:
+            zip_file.write(file)
+
+
+def ensure_directory(directory_path: Path) -> None:
+    directory_path.mkdir(parents=True, exist_ok=True)
 
 
 def patterns() -> list[tuple[Pattern, (int | float)]]:
@@ -67,135 +124,118 @@ def patterns() -> list[tuple[Pattern, (int | float)]]:
         (compile(rf'^og{separator}5(?:.*)?$'), 5),                                      # og5 / og_5 / og-5 / og5_detail
     ]
 
+
 def normalize_string(s: str) -> str:
     s = normalize('NFD', s).encode('ascii', 'ignore').decode('ascii')
     return sub(r'\s+', ' ', s).strip().lower()
 
-def identify_sheet(name: str) -> int | None:
+
+def identify_sheet(name: str) -> int | float | None:
     normalized = normalize_string(name)
     for pattern, index in patterns():
         if pattern.search(normalized):
             return index
     return None
 
-def read_sheet(file_path: Path, sheet_name: str, usecols: str) -> DataFrame:
-    return read_excel(io=file_path, sheet_name=sheet_name, engine='calamine', skiprows=1, dtype=str, usecols=usecols)
 
-def export_dataframe(worksheet, dataframe: DataFrame, file_name: str) -> None:
-    worksheet.write_row(0, 0, [str(column) for column in dataframe.columns])
+def drop_columns(dataframe: DataFrame, *, exclude: set[str] = frozenset()) -> DataFrame:
+    columns_to_drop = [
+        column for column in dataframe.columns
+        if column in exclude or unnamed_pattern.match(column)
+    ]
+    return dataframe.drop(columns_to_drop)
 
-    total_rows = len(dataframe)
+
+def export_dataframe(workbook: Workbook, worksheet_name: str, dataframe: DataFrame) -> None:
+    worksheet = workbook.add_worksheet(worksheet_name)
+    worksheet.write_row(0, 0, dataframe.columns)
+
+    total_rows = dataframe.height
     rows_width = len(str(total_rows))
 
-    for row_index, row in enumerate(dataframe.itertuples(index=False, name=None), start=1):
+    for row_index, row in enumerate(dataframe.iter_rows(), start=1):
         progress = f'{row_index:>{rows_width}}/{total_rows}'
-        logger.debug(f'{progress:<{rows_width * 2 + 1 + 4}}{file_name}')
-        worksheet.write_row(row_index, 0, [None if isna(value) else value for value in row])
-
-def clear_directory(directory_path: Path) -> None:
-    for item in directory_path.iterdir():
-        if item.is_file() or item.is_symlink():
-            item.unlink()  # Elimina el archivo
-        elif item.is_dir():
-            rmtree(item)
-
-def remove_directory(directory_path: Path) -> None:
-    rmtree(directory_path)
-
-def extract_zip_file(zip_file_path: Path, output_directory_path: Path) -> None:
-    with ZipFile(file=zip_file_path, mode='r') as zip_file:
-        zip_file.extractall(output_directory_path)
-
-def compress_to_zip_file() -> None:
-    zip_file_path = (export_directory_path / f'{uuid4()}.zip')
-    with ZipFile(file=zip_file_path, mode='w', compression=ZIP_DEFLATED, compresslevel=9) as zip_file:
-        for file in data_files:
-            zip_file.write(file)
-    logger.debug(zip_file_path.as_posix())
-
-def ensure_directory(directory_path: Path) -> None:
-    directory_path.mkdir(parents=True, exist_ok=True)
+        logger.debug(f'{progress:<{rows_width * 2 + 1 + 4}}{worksheet_name}')
+        worksheet.write_row(row_index, 0, row)
 
 
-ensure_directory(data_directory_path)
-ensure_directory(export_directory_path)
+def main():
+    storage: dict[int | float, list[DataFrame]] = {}
+    errors: list[dict[str, str]] = []
 
-clear_directory(data_directory_path)
-clear_directory(export_directory_path)
+    for file_index, file in enumerate(data_files, 1):
 
-
-for item in input_directory_path.iterdir():
-    if item.suffix == '.zip':
-        extract_zip_file(item, data_directory_path)
-
-
-
-
-
-
-
-
-for file_index, file in enumerate(data_files, 1):
-    with ExcelFile(path_or_buffer=file, engine='calamine') as excel_file:
-        sheets = excel_file.sheet_names
-
-    for sheet_name in sheets:
-        if sheet_name.lower().startswith('i') or sheet_name.lower().startswith('d'):
+        if file.suffix not in allowed_extensions:
+            error = f'Archivo con extensión inválida \'{file.suffix}\''
+            errors.append({'Archivo': file.name, 'Descripción': error})
             continue
 
-        sheet_code = identify_sheet(sheet_name)
-        if sheet_code is None:
-            errors.append({'Archivo': file.name, 'Descripción': f'Hoja \'{sheet_name}\' inválida.'})
-            continue
+        excel_file_content = read_excel(
+            source=file,
+            engine='calamine',
+            sheet_id=0,
+            raise_if_empty=False,
+            read_options={'dtypes': 'string', 'header_row': 1}
+        )
 
-        try:
-            dataframe = read_sheet(file, sheet_name, usecols[sheet_code])
-        except ValueError:
-            errors.append({'Archivo': file.name, 'Descripción': f'Hoja \'{sheet_name}\' con columnas faltantes.'})
-            continue
+        for sheet_name, dataframe in excel_file_content.items():
+            sheet_code = identify_sheet(sheet_name)
+            if sheet_code is None:
+                error = f'Hoja inválida \'{sheet_name}\''
+                errors.append({'Archivo': file.name, 'Descripción': error})
+                continue
 
-        dataframe['Archivo'] = file.name
-
-        storage.setdefault(sheet_code, []).append(dataframe)
-
-        progress_width = len(str(total_files))
-        progress = f'{file_index:>{progress_width}}/{total_files}'
-        logger.debug(f'{progress:<{progress_width * 2 + 1 + 4}}{sheet_name:<28}{file.name}')
-
-
-export_batch_directory_path = export_directory_path / str(uuid4())
-ensure_directory(export_batch_directory_path)
+            if dataframe.is_empty():
+                error = 'Planilla vacía'
+                errors.append({'Archivo': file.name, 'Descripción': error})
+                continue
 
 
-# excel limita cada hoja a 1.048.576 filas (incluido el encabezado); si los
-# datos exceden ese límite se reparten en hojas adicionales dentro del mismo archivo.
-max_data_rows_per_sheet = 1_048_576 - 1
+            if dataframe.shape[1] == sheet_column_range[sheet_code]:
+                dataframe.columns = canonical_columns[sheet_code]
+                storage.setdefault(sheet_code, []).append(dataframe)
 
-total_sheets = len(storage)
-groups_width = len(str(total_sheets))
+                progress_width = len(str(total_data_files))
+                progress = f'{file_index:>{progress_width}}/{total_data_files}'
 
-for sheet_index, (sheet_code, dataframes) in enumerate(storage.items(), 1):
-    combined = concat(dataframes, ignore_index=True)
-    combined = combined.fillna('Sin información')
+                logger.debug(f'{progress:<{progress_width * 2 + 1 + 4}}{sheet_name:<28}{file.name}')
+                continue
 
-    export_file_path = (export_batch_directory_path / f'{sheet_names[sheet_code]}.xlsx')
-    base_sheet_name = sheet_names[sheet_code]
+            elif dataframe.shape[1] < sheet_column_range[sheet_code]:
+                error = f'{sheet_column_range[sheet_code] - dataframe.shape[1]} Columnas faltantes'
 
-    with ExcelWriter(export_file_path, engine='xlsxwriter', engine_kwargs={'options': {'constant_memory': True}}) as excel_writer:
-        excel_writer.book.use_zip64()
-        for chunk_index, chunk_start in enumerate(range(0, max(len(combined), 1), max_data_rows_per_sheet), start=1):
-            chunk = combined.iloc[chunk_start:chunk_start + max_data_rows_per_sheet]
-            chunk_sheet_name = base_sheet_name if chunk_index == 1 else f'{base_sheet_name} ({chunk_index})'[:31]
-            worksheet = excel_writer.book.add_worksheet(chunk_sheet_name)
-            export_dataframe(worksheet, chunk, export_file_path.name)
+            elif dataframe.shape[1] > sheet_column_range[sheet_code]:
+                error = f'{dataframe.shape[1] - sheet_column_range[sheet_code]} Columnas sobrantes'
 
-    progress = f'{sheet_index:>{groups_width}}/{total_sheets}'
-    logger.debug(f'{progress:<{groups_width * 2 + 1 + 4}}{base_sheet_name:<28}{len(combined):<14}{export_file_path.name}')
-
-errors_file_path = export_batch_directory_path / 'Errores.xlsx'
-with ExcelWriter(errors_file_path, engine='xlsxwriter') as excel_writer:
-    errors_worksheet = excel_writer.book.add_worksheet('Errores')
-    export_dataframe(errors_worksheet, DataFrame(errors).fillna('Sin información'), errors_file_path.name)
+            errors.append({'Archivo': file.name, 'Descripción': error})
 
 
-compress_to_zip_file()
+    ensure_directory(output_directory_path)
+    
+    total_sheets = len(storage)
+    groups_width = len(str(total_sheets))
+
+    for sheet_index, (sheet_code, dataframes) in enumerate(storage.items(), 1):
+        combined = concat(dataframes, how='vertical')
+        combined = combined.fill_null('Sin información')
+        sheet_file_path = (output_directory_path / f'{sheet_names[sheet_code]}.xlsx')
+
+        workbook = Workbook(sheet_file_path)
+        workbook.use_zip64()
+        export_dataframe(workbook, sheet_names[sheet_code], combined)
+        workbook.close()
+
+        progress = f'{sheet_index:>{groups_width}}/{total_sheets}'
+        logger.debug(f'{progress:<{groups_width * 2 + 1 + 4}}{sheet_names[sheet_code]:<28}{len(combined)}')
+
+    errors_file_path = output_directory_path / 'Errores.xlsx'
+    errors_workbook = Workbook(errors_file_path)
+    export_dataframe(errors_workbook, 'Errores', DataFrame(errors))
+    errors_workbook.close()
+    
+    
+    
+    compress_to_zip_file()
+
+if __name__ == '__main__':
+    main()
