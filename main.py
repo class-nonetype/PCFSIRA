@@ -9,10 +9,72 @@ from zipfile import ZIP_DEFLATED, ZipFile
 from shutil import rmtree
 
 
+def ensure_directory(directory_path: Path) -> None:
+    directory_path.mkdir(parents=True, exist_ok=True)
+
+
 
 def extract_zip_file(zip_file_path: Path, output_directory_path: Path) -> None:
+    if not output_directory_path.exists(): ensure_directory(output_directory_path)
+
     with ZipFile(file=zip_file_path, mode='r') as zip_file:
         zip_file.extractall(output_directory_path)
+
+
+
+def clear_directory(directory_path: Path) -> None:
+    for item in directory_path.iterdir():
+        if item.is_file() or item.is_symlink():
+            item.unlink()
+
+        elif item.is_dir():
+            rmtree(item)
+
+
+
+def remove_directory(directory_path: Path) -> None:
+    rmtree(directory_path)
+
+
+
+def compress_to_zip_file() -> None:
+    if not output_directory_path.exists():
+        ensure_directory(output_directory_path)
+
+    zip_file_path = (output_directory_path / f'{uuid4()}.zip')
+    with ZipFile(file=zip_file_path, mode='w', compression=ZIP_DEFLATED, compresslevel=9) as zip_file:
+        for file in data_files:
+            zip_file.write(file)
+
+
+
+def patterns() -> list[tuple[Pattern, (int | float)]]:
+    separator = r'[\s_-]*'
+    return [
+        (compile(rf'^og{separator}1(?:.*)?$'), 1),                                      # og1 / og_1 / og-1 / og1_detail
+        (compile(rf'^og{separator}2(?:.*)?$'), 2),                                      # og2 / og_2 / og-2 / og2_detail
+        (compile(rf'^og{separator}3(?:.*)?$'), 3),                                      # og3 / og_3 / og-3 / og3_detail
+        (compile(rf'^og{separator}4{separator}misc(?:.*)?$'), 4.2),                     # og4_misc_detail
+        (compile(rf'^og{separator}4{separator}staff(?:.*)?$'), 4.3),                    # og4_staff
+        (compile(rf'^og{separator}5(?:.*)?$'), 5),                                      # og5 / og_5 / og-5 / og5_detail
+    ]
+
+
+
+def normalize_string(s: str) -> str:
+    s = normalize('NFD', s).encode('ascii', 'ignore').decode('ascii')
+    return sub(r'\s+', ' ', s).strip().lower()
+
+
+
+def identify_sheet(name: str) -> int | float | None:
+    normalized = normalize_string(name)
+    for pattern, index in patterns():
+        if pattern.search(normalized):
+            return index
+    return None
+
+
 
 
 basicConfig(
@@ -29,7 +91,6 @@ base_directory_path = (execution_path / 'base')
 source_directory_path = (execution_path / 'source')
 data_directory_path = (execution_path / 'data')
 output_directory_path = (execution_path / 'output')
-
 
 for item in source_directory_path.iterdir():
     if item.suffix != '.zip':
@@ -88,54 +149,12 @@ canonical_columns = {
 }
 
 
-def clear_directory(directory_path: Path) -> None:
-    for item in directory_path.iterdir():
-        if item.is_file() or item.is_symlink():
-            item.unlink()
-
-        elif item.is_dir():
-            rmtree(item)
-
-
-def remove_directory(directory_path: Path) -> None:
-    rmtree(directory_path)
 
 
 
-def compress_to_zip_file() -> None:
-    zip_file_path = (output_directory_path / f'{uuid4()}.zip')
-    with ZipFile(file=zip_file_path, mode='w', compression=ZIP_DEFLATED, compresslevel=9) as zip_file:
-        for file in data_files:
-            zip_file.write(file)
 
 
-def ensure_directory(directory_path: Path) -> None:
-    directory_path.mkdir(parents=True, exist_ok=True)
 
-
-def patterns() -> list[tuple[Pattern, (int | float)]]:
-    separator = r'[\s_-]*'
-    return [
-        (compile(rf'^og{separator}1(?:.*)?$'), 1),                                      # og1 / og_1 / og-1 / og1_detail
-        (compile(rf'^og{separator}2(?:.*)?$'), 2),                                      # og2 / og_2 / og-2 / og2_detail
-        (compile(rf'^og{separator}3(?:.*)?$'), 3),                                      # og3 / og_3 / og-3 / og3_detail
-        (compile(rf'^og{separator}4{separator}misc(?:.*)?$'), 4.2),                     # og4_misc_detail
-        (compile(rf'^og{separator}4{separator}staff(?:.*)?$'), 4.3),                    # og4_staff
-        (compile(rf'^og{separator}5(?:.*)?$'), 5),                                      # og5 / og_5 / og-5 / og5_detail
-    ]
-
-
-def normalize_string(s: str) -> str:
-    s = normalize('NFD', s).encode('ascii', 'ignore').decode('ascii')
-    return sub(r'\s+', ' ', s).strip().lower()
-
-
-def identify_sheet(name: str) -> int | float | None:
-    normalized = normalize_string(name)
-    for pattern, index in patterns():
-        if pattern.search(normalized):
-            return index
-    return None
 
 
 def drop_columns(dataframe: DataFrame, *, exclude: set[str] = frozenset()) -> DataFrame:
@@ -157,6 +176,7 @@ def export_dataframe(workbook: Workbook, worksheet_name: str, dataframe: DataFra
         progress = f'{row_index:>{rows_width}}/{total_rows}'
         logger.debug(f'{progress:<{rows_width * 2 + 1 + 4}}{worksheet_name}')
         worksheet.write_row(row_index, 0, row)
+
 
 
 def main():
@@ -209,11 +229,11 @@ def main():
 
             errors.append({'Archivo': file.name, 'Descripción': error})
 
-
-    ensure_directory(output_directory_path)
     
     total_sheets = len(storage)
     groups_width = len(str(total_sheets))
+
+    ensure_directory(output_directory_path)
 
     for sheet_index, (sheet_code, dataframes) in enumerate(storage.items(), 1):
         combined = concat(dataframes, how='vertical')
