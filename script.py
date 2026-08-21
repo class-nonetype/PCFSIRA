@@ -16,6 +16,7 @@ getLogger('fastexcel').setLevel(ERROR)
 
 logger = getLogger(__name__)
 execution_path = Path(__file__).parent
+base_directory_path = (execution_path / 'base')
 data_directory_path = (execution_path / 'data')
 input_directory_path = (execution_path / 'input')
 output_directory_path = (execution_path / 'output')
@@ -62,13 +63,15 @@ base_sheet_names = {
     5: 'og5_detail',
 }
 
-base_template_path = next((execution_path / 'base').glob('*.xlsx'))
-base_template_sheets = read_excel(source=base_template_path, sheet_id=0, read_options={'header_row': 1})
+base_file_path = next(base_directory_path.glob('*.xlsx'))
+base_file_sheets = read_excel(source=base_file_path, sheet_id=0, read_options={'header_row': 1})
 
 canonical_columns = {
-    sheet_code: base_template_sheets[base_sheet_name].columns
+    sheet_code: base_file_sheets[base_sheet_name].columns
     for sheet_code, base_sheet_name in base_sheet_names.items()
 }
+
+
 
 
 def patterns() -> list[tuple[Pattern, (int | float)]]:
@@ -82,9 +85,11 @@ def patterns() -> list[tuple[Pattern, (int | float)]]:
         (compile(rf'^og{separator}5(?:.*)?$'), 5),                                      # og5 / og_5 / og-5 / og5_detail
     ]
 
+
 def normalize_string(s: str) -> str:
     s = normalize('NFD', s).encode('ascii', 'ignore').decode('ascii')
     return sub(r'\s+', ' ', s).strip().lower()
+
 
 def identify_sheet(name: str) -> int | float | None:
     normalized = normalize_string(name)
@@ -113,7 +118,6 @@ def export_dataframe(workbook: Workbook, worksheet_name: str, dataframe: DataFra
         progress = f'{row_index:>{rows_width}}/{total_rows}'
         logger.debug(f'{progress:<{rows_width * 2 + 1 + 4}}{worksheet_name}')
         worksheet.write_row(row_index, 0, row)
-
 
 
 def main():
