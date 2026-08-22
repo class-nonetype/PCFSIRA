@@ -153,17 +153,13 @@ base_sheet_names = {
     5: 'og5_detail',
 }
 
-base_file_path = next(base_directory_path.glob('*.xlsx'))
-base_file_sheets = read_excel(source=base_file_path, sheet_id=0, read_options={'header_row': 1})
+base_file_path: Path = next(base_directory_path.glob('*.xlsx'))
+base_file_sheets: dict[str, DataFrame] = read_excel(source=base_file_path, sheet_id=0, read_options={'header_row': 1})
 
-canonical_columns = {
+canonical_columns: dict[int, list[str]] = {
     sheet_code: base_file_sheets[base_sheet_name].columns
     for sheet_code, base_sheet_name in base_sheet_names.items()
 }
-
-
-
-
 
 
 
@@ -178,7 +174,7 @@ def drop_columns(dataframe: DataFrame, *, exclude: set[str] = frozenset()) -> Da
     return dataframe.drop(columns_to_drop)
 
 
-def export_dataframe(workbook: Workbook, worksheet_name: str, dataframe: DataFrame) -> None:
+def write_dataframe(workbook: Workbook, worksheet_name: str, dataframe: DataFrame) -> None:
     worksheet = workbook.add_worksheet(worksheet_name)
 
     header_format = workbook.add_format({
@@ -203,13 +199,73 @@ def export_dataframe(workbook: Workbook, worksheet_name: str, dataframe: DataFra
 
 
 
-def main():
-    # lista para almacenamiento de los dataframes extraidos
-    storage: dict[int | float, list[DataFrame]] = {}
-    
-    # lista para almacenamiento de posibles errores durante la consolidación
-    errors: list[dict[str, str]] = []
+def export_dataframe(storage: dict[int | float, list[DataFrame]], errors: list[dict[str, str]]):
+    # entiendase como '{ código: consolidación }'
+    combined_by_code = {
+        sheet_code: (
+            concat(dataframes, how='vertical')
+            .with_columns(col(String).str.strip_chars().replace('', None))
+            .fill_null('Sin información')
+        )
+        for sheet_code, dataframes in storage.items()
+    }
 
+
+    # consolidación en base de datos local
+    #engine = create_engine(environ['DATABASE_URL'])
+    #for sheet_code, combined in combined_by_code.items():
+    #    table_name = base_sheet_names[sheet_code]
+    #    combined.write_database(table_name=table_name, connection=engine, if_table_exists='append')
+    #    logger.debug(f'{table_name:<28}{len(combined)} filas insertadas')
+
+
+    
+    
+    # consolidación en archivos excel
+    total_output_files = len(output_files)
+    output_files_width = len(str(total_output_files))
+
+    clear_directory(output_directory_path)
+
+    exported_file_paths: list[Path] = []
+
+    for file_index, (file_name, sheet_codes) in enumerate(output_files.items(), 1):
+        combined_sheets = {
+            sheet_code: combined_by_code[sheet_code]
+            for sheet_code in sheet_codes
+            if sheet_code in combined_by_code
+        }
+        if not combined_sheets:
+            continue
+
+        output_file_path = (output_directory_path / f'{file_name}.xlsx')
+
+        workbook = Workbook(output_file_path)
+        workbook.use_zip64()
+        for sheet_code, combined in combined_sheets.items():
+            write_dataframe(workbook, sheet_names[sheet_code], combined)
+        workbook.close()
+        exported_file_paths.append(output_file_path)
+
+        progress = f'{file_index:>{output_files_width}}/{total_output_files}'
+        logger.debug(f'{progress:<{output_files_width * 2 + 1 + 4}}{file_name:<28}{sum(len(df) for df in combined_sheets.values())}')
+
+    output_file_path = (output_directory_path / 'Errores.xlsx')
+    errors_workbook = Workbook(output_file_path)
+    write_dataframe(errors_workbook, 'Errores', DataFrame(errors))
+    errors_workbook.close()
+    exported_file_paths.append(output_file_path)
+
+
+    # comprime en un .zip todos los archivos consolidados
+    compress_to_zip_file(exported_file_paths)
+
+
+
+
+
+def process_dataframe() -> None:
+    storage, errors = {}, []
 
     for file_index, file in enumerate(data_files, 1):
         
@@ -274,66 +330,15 @@ def main():
                     for column in extra_columns:
                         errors.append({'Archivo': file.name, 'Descripción': f'Columna \'{column}\' sobrante'})
                 continue
-
-
-    # entiendase como '{ código: consolidación }'
-    combined_by_code = {
-        sheet_code: (
-            concat(dataframes, how='vertical')
-            .with_columns(col(String).str.strip_chars().replace('', None))
-            .fill_null('Sin información')
-        )
-        for sheet_code, dataframes in storage.items()
-    }
-
-
-    # consolidación en base de datos local
-    #engine = create_engine(environ['DATABASE_URL'])
-    #for sheet_code, combined in combined_by_code.items():
-    #    table_name = base_sheet_names[sheet_code]
-    #    combined.write_database(table_name=table_name, connection=engine, if_table_exists='append')
-    #    logger.debug(f'{table_name:<28}{len(combined)} filas insertadas')
-
+    
+    
+    
+def main():
+    storage, errors = process_dataframe()
+    export_dataframe(storage, errors)
 
     
-    # consolidación en archivos excel
-    total_output_files = len(output_files)
-    output_files_width = len(str(total_output_files))
-
-    clear_directory(output_directory_path)
-
-    exported_file_paths: list[Path] = []
-
-    for file_index, (file_name, sheet_codes) in enumerate(output_files.items(), 1):
-        combined_sheets = {
-            sheet_code: combined_by_code[sheet_code]
-            for sheet_code in sheet_codes
-            if sheet_code in combined_by_code
-        }
-        if not combined_sheets:
-            continue
-
-        output_file_path = (output_directory_path / f'{file_name}.xlsx')
-
-        workbook = Workbook(output_file_path)
-        workbook.use_zip64()
-        for sheet_code, combined in combined_sheets.items():
-            export_dataframe(workbook, sheet_names[sheet_code], combined)
-        workbook.close()
-        exported_file_paths.append(output_file_path)
-
-        progress = f'{file_index:>{output_files_width}}/{total_output_files}'
-        logger.debug(f'{progress:<{output_files_width * 2 + 1 + 4}}{file_name:<28}{sum(len(df) for df in combined_sheets.values())}')
-
-    output_file_path = (output_directory_path / 'Errores.xlsx')
-    errors_workbook = Workbook(output_file_path)
-    export_dataframe(errors_workbook, 'Errores', DataFrame(errors))
-    errors_workbook.close()
-    exported_file_paths.append(output_file_path)
-
-
-    # comprime en un .zip todos los archivos consolidados
-    compress_to_zip_file(exported_file_paths)
+    
 
 if __name__ == '__main__':
     main()
