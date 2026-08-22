@@ -174,7 +174,10 @@ def drop_columns(dataframe: DataFrame, *, exclude: set[str] = frozenset()) -> Da
     return dataframe.drop(columns_to_drop)
 
 
-def write_dataframe(workbook: Workbook, worksheet_name: str, dataframe: DataFrame) -> None:
+
+def write_dataframe(workbook: Workbook,
+                    worksheet_name: str,
+                    dataframe: DataFrame) -> None:
     worksheet = workbook.add_worksheet(worksheet_name)
 
     header_format = workbook.add_format({
@@ -199,7 +202,8 @@ def write_dataframe(workbook: Workbook, worksheet_name: str, dataframe: DataFram
 
 
 
-def export_dataframe(storage: dict[int | float, list[DataFrame]], errors: list[dict[str, str]]):
+def export_dataframe(storage: dict[int | float, list[DataFrame]],
+                     errors: list[dict[str, str]]):
     # entiendase como '{ código: consolidación }'
     combined_by_code = {
         sheet_code: (
@@ -262,6 +266,15 @@ def export_dataframe(storage: dict[int | float, list[DataFrame]], errors: list[d
 
 
 
+def extract_dataframe(file_path: Path) -> dict[str, DataFrame]:
+    return read_excel(
+        source=file_path,
+        engine='calamine',
+        sheet_id=0,
+        raise_if_empty=False,
+        read_options={'dtypes': 'string', 'header_row': 1}
+    )
+
 
 
 def process_dataframe() -> tuple[dict[int | float, list[DataFrame]], list[dict[str, str]]]:
@@ -269,35 +282,48 @@ def process_dataframe() -> tuple[dict[int | float, list[DataFrame]], list[dict[s
 
     for file_index, file in enumerate(data_files, 1):
         
-        # caso de extensión inválida
-        if file.suffix not in allowed_extensions:
-            errors.append({'Archivo': file.name, 'Descripción': f'Archivo con extensión inválida \'{file.suffix}\''})
-            continue
+        file_name = file.name
+        file_extension = file.suffix
         
+        # caso de extensión inválida
+        if file_extension not in allowed_extensions:
+            errors.append(
+                {
+                    'Archivo': file_name,
+                    'Descripción': f'Archivo con extensión inválida \'{file_extension}\''
+                }
+            )
+            continue
+
         # lectura de archivo excel
-        excel_file_content: dict[str, DataFrame] = read_excel(
-            source=file,
-            engine='calamine',
-            sheet_id=0,
-            raise_if_empty=False,
-            read_options={'dtypes': 'string', 'header_row': 1}
-        )
+        excel_file_content = extract_dataframe(file)
         for sheet_name, dataframe in excel_file_content.items():
+
             if (sheet_name.lower().startswith('in')
                 or sheet_name.lower().startswith('li')
                 or sheet_name.lower().startswith('de')):
                 continue
-            
+
             sheet_code = identify_sheet(sheet_name)
             
             # hojas sin match
             if sheet_code is None:
-                errors.append({'Archivo': file.name, 'Descripción': f'Hoja \'{sheet_name}\' inválida'})
+                errors.append(
+                    {
+                        'Archivo': file_name,
+                        'Descripción': f'Hoja \'{sheet_name}\' inválida'
+                    }
+                )
                 continue
 
             # hojas sin contenido
             if dataframe.is_empty():
-                errors.append({'Archivo': file.name, 'Descripción': f'Hoja \'{sheet_name}\' vacía'})
+                errors.append(
+                    {
+                        'Archivo': file_name,
+                        'Descripción': f'Hoja \'{sheet_name}\' vacía'
+                    }
+                )
                 continue
 
             # caso 1: el dataframe cumple con el formato establecido por la planilla base
@@ -310,7 +336,7 @@ def process_dataframe() -> tuple[dict[int | float, list[DataFrame]], list[dict[s
                 progress_width = len(str(total_data_files))
                 progress = f'{file_index:>{progress_width}}/{total_data_files}'
 
-                logger.debug(f'{progress:<{progress_width * 2 + 1 + 4}}{sheet_name:<28}{file.name}')
+                logger.debug(f'{progress:<{progress_width * 2 + 1 + 4}}{sheet_name:<28}{file_name}')
                 continue
             
             # caso 2: el dataframe cuenta con columnas faltantes
@@ -320,7 +346,13 @@ def process_dataframe() -> tuple[dict[int | float, list[DataFrame]], list[dict[s
                 missing_columns = set(canonical_columns[sheet_code]) - set(dataframe.columns)
                 if len(missing_columns) > 0:
                     for column in missing_columns:
-                        errors.append({'Archivo': file.name, 'Descripción': f'Columna \'{column}\' faltante'})
+                        errors.append(
+                            {
+                                'Archivo': file_name,
+                                'Descripción': f'Columna \'{column}\' faltante'
+                            }
+                        )
+
                 continue
 
             # caso 3: el dataframe cuenta con columnas sobrantes
@@ -330,18 +362,22 @@ def process_dataframe() -> tuple[dict[int | float, list[DataFrame]], list[dict[s
                 extra_columns = set(dataframe.columns) - set(canonical_columns[sheet_code])
                 if len(extra_columns) > 0:
                     for column in extra_columns:
-                        errors.append({'Archivo': file.name, 'Descripción': f'Columna \'{column}\' sobrante'})
+                        errors.append(
+                            {
+                                'Archivo': file_name,
+                                'Descripción': f'Columna \'{column}\' sobrante'
+                            }
+                        )
                 continue
     
     return storage, errors
     
-    
-def main():
+
+
+def main() -> None:
     storage, errors = process_dataframe()
     export_dataframe(storage, errors)
 
-    
-    
 
 if __name__ == '__main__':
     main()
