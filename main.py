@@ -264,7 +264,7 @@ def export_dataframe(storage: dict[int | float, list[DataFrame]], errors: list[d
 
 
 
-def process_dataframe() -> None:
+def process_dataframe() -> tuple[dict[int | float, list[DataFrame]], list[dict[str, str]]]:
     storage, errors = {}, []
 
     for file_index, file in enumerate(data_files, 1):
@@ -283,7 +283,9 @@ def process_dataframe() -> None:
             read_options={'dtypes': 'string', 'header_row': 1}
         )
         for sheet_name, dataframe in excel_file_content.items():
-            if sheet_name.lower().startswith('i') or sheet_name.lower().startswith('d'):
+            if (sheet_name.lower().startswith('in')
+                or sheet_name.lower().startswith('li')
+                or sheet_name.lower().startswith('de')):
                 continue
             
             sheet_code = identify_sheet(sheet_name)
@@ -331,6 +333,7 @@ def process_dataframe() -> None:
                         errors.append({'Archivo': file.name, 'Descripción': f'Columna \'{column}\' sobrante'})
                 continue
     
+    return storage, errors
     
     
 def main():
